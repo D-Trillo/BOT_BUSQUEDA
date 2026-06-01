@@ -13,6 +13,34 @@ Entrez.email = YOUR_EMAIL
 Entrez.api_key = PUBMED_API_KEY
 
 
+def contains_keywords(text, keywords):
+    """Comprueba si alguna de las palabras clave aparece en el texto"""
+    if not text:
+        return False
+    text_lower = text.lower()
+    # Divide las keywords por comas y comprueba cada una
+    keyword_list = [kw.strip().lower() for kw in keywords.split(",")]
+    for kw in keyword_list:
+        if kw and kw in text_lower:
+            return True
+    return False
+
+
+def is_relevant(article, keywords):
+    """Devuelve True si el artículo tiene las keywords en título o abstract"""
+    title = article.get("title", "")
+    abstract = article.get("abstract", "")
+    in_title = contains_keywords(title, keywords)
+    in_abstract = contains_keywords(abstract, keywords)
+    if in_title:
+        print(f"✅ Relevante (título): {title[:60]}")
+    elif in_abstract:
+        print(f"✅ Relevante (abstract): {title[:60]}")
+    else:
+        print(f"❌ Descartado (no contiene keywords): {title[:60]}")
+    return in_title or in_abstract
+
+
 def get_open_access_pdf(doi, email):
     """Busca PDF gratuito usando Unpaywall"""
     if not doi:
@@ -36,12 +64,14 @@ def get_open_access_pdf(doi, email):
 def search_pubmed(keywords, year_start, year_end):
     results = []
     try:
-        query = f"{keywords} AND {year_start}:{year_end}[pdat]"
-        handle = Entrez.esearch(db="pubmed", term=query, retmax=10)
+        # Búsqueda específica en título y abstract
+        query = f"{keywords}[Title/Abstract] AND {year_start}:{year_end}[pdat]"
+        handle = Entrez.esearch(db="pubmed", term=query, retmax=20)
         record = Entrez.read(handle)
         ids = record["IdList"]
 
         if not ids:
+            print("PubMed: sin resultados")
             return []
 
         handle2 = Entrez.efetch(db="pubmed", id=",".join(ids), rettype="abstract", retmode="xml")
@@ -61,7 +91,6 @@ def search_pubmed(keywords, year_start, year_end):
                 year = str(med.get("DateCompleted", {}).get("Year", year_start))
                 pmid = str(med["PMID"])
 
-                # Intentar obtener DOI
                 doi = None
                 id_list = art.get("ELocationID", [])
                 for loc in id_list:
@@ -69,11 +98,10 @@ def search_pubmed(keywords, year_start, year_end):
                         doi = str(loc)
                         break
 
-                # Buscar PDF en Unpaywall si hay DOI
                 pdf_url = get_open_access_pdf(doi, YOUR_EMAIL) if doi else None
                 fallback_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
 
-                results.append({
+                candidate = {
                     "title": title,
                     "authors": authors,
                     "abstract": abstract,
@@ -83,9 +111,15 @@ def search_pubmed(keywords, year_start, year_end):
                     "doi": doi,
                     "pmid": pmid,
                     "has_pdf": pdf_url is not None
-                })
+                }
+
+                # Solo añadir si contiene las keywords en título o abstract
+                if is_relevant(candidate, keywords):
+                    results.append(candidate)
+
             except Exception as e:
                 continue
+
     except Exception as e:
         print(f"Error PubMed: {e}")
     return results
@@ -97,9 +131,10 @@ def search_scopus(keywords, year_start, year_end):
         url = "https://api.elsevier.com/content/search/scopus"
         headers = {"X-ELS-APIKey": ELSEVIER_API_KEY, "Accept": "application/json"}
         params = {
-            "query": f"TITLE-ABS-KEY({keywords}) AND PUBYEAR > {int(year_start)-1} AND PUBYEAR < {int(year_end)+1}",
-            "count": 10,
-            "field": "dc:title,dc:creator,prism:publicationName,prism:coverDate,dc:description,prism:doi"
+            # Búsqueda específica en título y abstract
+            "query": f"TITLE-ABS({keywords}) AND PUBYEAR > {int(year_start)-1} AND PUBYEAR < {int(year_end)+1}",
+            "count": 20,
+            "field": "dc:title,dc:creator,prism:coverDate,dc:description,prism:doi"
         }
         response = requests.get(url, headers=headers, params=params)
         data = response.json()
@@ -112,10 +147,9 @@ def search_scopus(keywords, year_start, year_end):
             abstract = entry.get("dc:description", "No disponible")
             doi = entry.get("prism:doi", "")
 
-            # Buscar PDF en Unpaywall
             pdf_url = get_open_access_pdf(doi, YOUR_EMAIL) if doi else None
 
-            results.append({
+            candidate = {
                 "title": title,
                 "authors": author,
                 "abstract": abstract,
@@ -124,7 +158,12 @@ def search_scopus(keywords, year_start, year_end):
                 "url": pdf_url or (f"https://doi.org/{doi}" if doi else ""),
                 "doi": doi,
                 "has_pdf": pdf_url is not None
-            })
+            }
+
+            # Solo añadir si contiene las keywords en título o abstract
+            if is_relevant(candidate, keywords):
+                results.append(candidate)
+
     except Exception as e:
         print(f"Error Scopus: {e}")
     return results
@@ -138,7 +177,7 @@ def search_sciencedirect(keywords, year_start, year_end):
         params = {
             "query": keywords,
             "date": f"{year_start}-{year_end}",
-            "count": 10,
+            "count": 20,
             "field": "dc:title,authors,prism:coverDate,dc:description,prism:doi"
         }
         response = requests.get(url, headers=headers, params=params)
@@ -152,10 +191,9 @@ def search_sciencedirect(keywords, year_start, year_end):
             abstract = entry.get("dc:description", "No disponible")
             doi = entry.get("prism:doi", "")
 
-            # Buscar PDF en Unpaywall
             pdf_url = get_open_access_pdf(doi, YOUR_EMAIL) if doi else None
 
-            results.append({
+            candidate = {
                 "title": title,
                 "authors": author,
                 "abstract": abstract,
@@ -164,17 +202,24 @@ def search_sciencedirect(keywords, year_start, year_end):
                 "url": pdf_url or (f"https://doi.org/{doi}" if doi else ""),
                 "doi": doi,
                 "has_pdf": pdf_url is not None
-            })
+            }
+
+            # Solo añadir si contiene las keywords en título o abstract
+            if is_relevant(candidate, keywords):
+                results.append(candidate)
+
     except Exception as e:
         print(f"Error ScienceDirect: {e}")
     return results
 
 
 def search_all_databases(keywords, year_start, year_end):
-    print(f"Buscando en todas las bases de datos: {keywords}")
+    print(f"\nBuscando: '{keywords}' ({year_start}-{year_end})")
+    print("=" * 50)
     results = []
     results += search_pubmed(keywords, year_start, year_end)
     results += search_scopus(keywords, year_start, year_end)
     results += search_sciencedirect(keywords, year_start, year_end)
-    print(f"Total resultados: {len(results)}")
+    print(f"\nTotal artículos relevantes encontrados: {len(results)}")
+    print("=" * 50)
     return results
