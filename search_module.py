@@ -14,11 +14,9 @@ Entrez.api_key = PUBMED_API_KEY
 
 
 def contains_keywords(text, keywords):
-    """Comprueba si alguna de las palabras clave aparece en el texto"""
     if not text:
         return False
     text_lower = text.lower()
-    # Divide las keywords por comas y comprueba cada una
     keyword_list = [kw.strip().lower() for kw in keywords.split(",")]
     for kw in keyword_list:
         if kw and kw in text_lower:
@@ -27,7 +25,6 @@ def contains_keywords(text, keywords):
 
 
 def is_relevant(article, keywords):
-    """Devuelve True si el artículo tiene las keywords en título o abstract"""
     title = article.get("title", "")
     abstract = article.get("abstract", "")
     in_title = contains_keywords(title, keywords)
@@ -37,12 +34,11 @@ def is_relevant(article, keywords):
     elif in_abstract:
         print(f"✅ Relevante (abstract): {title[:60]}")
     else:
-        print(f"❌ Descartado (no contiene keywords): {title[:60]}")
+        print(f"❌ Descartado: {title[:60]}")
     return in_title or in_abstract
 
 
 def get_open_access_pdf(doi, email):
-    """Busca PDF gratuito usando Unpaywall"""
     if not doi:
         return None
     try:
@@ -61,11 +57,38 @@ def get_open_access_pdf(doi, email):
     return None
 
 
+def get_full_abstract_elsevier(doi, api_key):
+    """Obtiene el abstract completo via Elsevier Abstract Retrieval API cuando el de búsqueda viene truncado."""
+    if not doi or not api_key:
+        return ""
+    try:
+        url = f"https://api.elsevier.com/content/abstract/doi/{doi}"
+        headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            abstract = (
+                data.get("abstracts-retrieval-response", {})
+                    .get("coredata", {})
+                    .get("dc:description", "")
+            )
+            if abstract:
+                print(f"Abstract completo obtenido ({len(abstract)} chars)")
+                return abstract
+    except Exception as e:
+        print(f"Error obteniendo abstract Elsevier: {e}")
+    return ""
+
+
 def search_pubmed(keywords, year_start, year_end):
     results = []
     try:
-        # Búsqueda específica en título y abstract
-        query = f"{keywords}[Title/Abstract] AND {year_start}:{year_end}[pdat]"
+        # Aplica [Title/Abstract] a cada keyword por separado y los une con OR
+        keyword_list = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+        term_parts = " OR ".join([f'("{kw}"[Title/Abstract])' for kw in keyword_list])
+        query = f"({term_parts}) AND {year_start}:{year_end}[pdat]"
+        print(f"PubMed query: {query}")
+
         handle = Entrez.esearch(db="pubmed", term=query, retmax=20)
         record = Entrez.read(handle)
         ids = record["IdList"]
@@ -87,13 +110,15 @@ def search_pubmed(keywords, year_start, year_end):
                     a.get("LastName", "") + " " + a.get("ForeName", "")
                     for a in authors_list[:3] if "LastName" in a
                 ])
-                abstract = str(art.get("Abstract", {}).get("AbstractText", [""])[0])
+                # Captura todas las secciones del abstract (structured abstracts)
+                abstract_parts = art.get("Abstract", {}).get("AbstractText", [""])
+                abstract = " ".join([str(p) for p in abstract_parts])
+
                 year = str(med.get("DateCompleted", {}).get("Year", year_start))
                 pmid = str(med["PMID"])
 
                 doi = None
-                id_list = art.get("ELocationID", [])
-                for loc in id_list:
+                for loc in art.get("ELocationID", []):
                     if loc.attributes.get("EIdType") == "doi":
                         doi = str(loc)
                         break
@@ -113,11 +138,10 @@ def search_pubmed(keywords, year_start, year_end):
                     "has_pdf": pdf_url is not None
                 }
 
-                # Solo añadir si contiene las keywords en título o abstract
                 if is_relevant(candidate, keywords):
                     results.append(candidate)
 
-            except Exception as e:
+            except Exception:
                 continue
 
     except Exception as e:
@@ -130,9 +154,15 @@ def search_scopus(keywords, year_start, year_end):
     try:
         url = "https://api.elsevier.com/content/search/scopus"
         headers = {"X-ELS-APIKey": ELSEVIER_API_KEY, "Accept": "application/json"}
+
+        # Aplica TITLE-ABS a cada keyword por separado y los une con OR
+        keyword_list = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+        term_parts = " OR ".join([f'TITLE-ABS("{kw}")' for kw in keyword_list])
+        query = f"({term_parts}) AND PUBYEAR > {int(year_start)-1} AND PUBYEAR < {int(year_end)+1}"
+        print(f"Scopus query: {query}")
+
         params = {
-            # Búsqueda específica en título y abstract
-            "query": f"TITLE-ABS({keywords}) AND PUBYEAR > {int(year_start)-1} AND PUBYEAR < {int(year_end)+1}",
+            "query": query,
             "count": 20,
             "field": "dc:title,dc:creator,prism:coverDate,dc:description,prism:doi"
         }
@@ -144,8 +174,14 @@ def search_scopus(keywords, year_start, year_end):
             title = entry.get("dc:title", "Sin título")
             author = entry.get("dc:creator", "Desconocido")
             year = entry.get("prism:coverDate", "?")[:4]
-            abstract = entry.get("dc:description", "No disponible")
+            abstract = entry.get("dc:description", "")
             doi = entry.get("prism:doi", "")
+
+            # Si el abstract viene vacío o truncado, obtener el completo
+            if len(abstract) < 100 and doi:
+                full = get_full_abstract_elsevier(doi, ELSEVIER_API_KEY)
+                if full:
+                    abstract = full
 
             pdf_url = get_open_access_pdf(doi, YOUR_EMAIL) if doi else None
 
@@ -160,7 +196,6 @@ def search_scopus(keywords, year_start, year_end):
                 "has_pdf": pdf_url is not None
             }
 
-            # Solo añadir si contiene las keywords en título o abstract
             if is_relevant(candidate, keywords):
                 results.append(candidate)
 
@@ -174,8 +209,14 @@ def search_sciencedirect(keywords, year_start, year_end):
     try:
         url = "https://api.elsevier.com/content/search/sciencedirect"
         headers = {"X-ELS-APIKey": ELSEVIER_API_KEY, "Accept": "application/json"}
+
+        # Aplica TITLE-ABS-KEY a cada keyword por separado y los une con OR
+        keyword_list = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+        term_parts = " OR ".join([f'TITLE-ABS-KEY("{kw}")' for kw in keyword_list])
+        print(f"ScienceDirect query: {term_parts}")
+
         params = {
-            "query": keywords,
+            "query": term_parts,
             "date": f"{year_start}-{year_end}",
             "count": 20,
             "field": "dc:title,authors,prism:coverDate,dc:description,prism:doi"
@@ -188,8 +229,14 @@ def search_sciencedirect(keywords, year_start, year_end):
             title = entry.get("dc:title", "Sin título")
             author = entry.get("authors", "Desconocido")
             year = entry.get("prism:coverDate", "?")[:4]
-            abstract = entry.get("dc:description", "No disponible")
+            abstract = entry.get("dc:description", "")
             doi = entry.get("prism:doi", "")
+
+            # Si el abstract viene vacío o truncado, obtener el completo
+            if len(abstract) < 100 and doi:
+                full = get_full_abstract_elsevier(doi, ELSEVIER_API_KEY)
+                if full:
+                    abstract = full
 
             pdf_url = get_open_access_pdf(doi, YOUR_EMAIL) if doi else None
 
@@ -204,7 +251,6 @@ def search_sciencedirect(keywords, year_start, year_end):
                 "has_pdf": pdf_url is not None
             }
 
-            # Solo añadir si contiene las keywords en título o abstract
             if is_relevant(candidate, keywords):
                 results.append(candidate)
 
@@ -216,10 +262,24 @@ def search_sciencedirect(keywords, year_start, year_end):
 def search_all_databases(keywords, year_start, year_end):
     print(f"\nBuscando: '{keywords}' ({year_start}-{year_end})")
     print("=" * 50)
-    results = []
-    results += search_pubmed(keywords, year_start, year_end)
-    results += search_scopus(keywords, year_start, year_end)
-    results += search_sciencedirect(keywords, year_start, year_end)
-    print(f"\nTotal artículos relevantes encontrados: {len(results)}")
+    all_results = []
+    all_results += search_pubmed(keywords, year_start, year_end)
+    all_results += search_scopus(keywords, year_start, year_end)
+    all_results += search_sciencedirect(keywords, year_start, year_end)
+
+    # Deduplicación por DOI (artículos que aparecen en varias fuentes)
+    seen_dois = set()
+    unique_results = []
+    for r in all_results:
+        doi = r.get("doi", "")
+        if doi and doi in seen_dois:
+            print(f"Duplicado eliminado: {r['title'][:60]}")
+            continue
+        if doi:
+            seen_dois.add(doi)
+        unique_results.append(r)
+
+    duplicates = len(all_results) - len(unique_results)
+    print(f"\nTotal artículos relevantes: {len(unique_results)} ({duplicates} duplicados eliminados)")
     print("=" * 50)
-    return results
+    return unique_results
