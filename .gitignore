@@ -1,0 +1,36 @@
+# Entorno virtual
+venv/
+
+# Variables de entorno y secretos
+.env
+*.env
+
+# Credenciales Google
+credentials.json
+oauth_credentials.json
+token.pickle
+*.pickle
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Distribución / empaquetado
+dist/
+build/
+*.egg-info/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
