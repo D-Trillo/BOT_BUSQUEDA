@@ -2,7 +2,6 @@ import os
 import requests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from dotenv import load_dotenv
@@ -14,6 +13,17 @@ load_dotenv()
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 OAUTH_CREDENTIALS_FILE = "oauth_credentials.json"
 TOKEN_FILE = "token.pickle"
+
+PAYWALL_SIGNALS = [
+    "sign in", "log in", "login", "subscribe", "purchase",
+    "access denied", "checkout", "create account", "institutional access",
+    "buy article", "rent article", "get access"
+]
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+]
 
 
 def get_drive_service():
@@ -39,35 +49,49 @@ def get_drive_service():
 
 
 def download_pdf(url):
-    """Intenta descargar un PDF desde una URL y devuelve el contenido en bytes"""
-    try:
-        print(f"Intentando descargar PDF desde: {url}")
-        response = requests.get(
-            url,
-            timeout=30,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/pdf,*/*"
-            },
-            allow_redirects=True
-        )
-        print(f"Respuesta descarga: Status {response.status_code}, Content-Type: {response.headers.get('Content-Type', 'desconocido')}, Tamaño: {len(response.content)} bytes")
+    """Descarga un PDF con detección de paywall y rotación de User-Agent ante errores 403."""
+    for attempt, user_agent in enumerate(USER_AGENTS, 1):
+        try:
+            print(f"Intento {attempt} — descargando: {url}")
+            response = requests.get(
+                url,
+                timeout=30,
+                headers={"User-Agent": user_agent, "Accept": "application/pdf,*/*"},
+                allow_redirects=True
+            )
+            print(f"Status {response.status_code} | Content-Type: {response.headers.get('Content-Type', '?')} | Tamaño: {len(response.content)} bytes")
 
-        if response.status_code == 200:
+            if response.status_code == 403:
+                print(f"403 Prohibido — probando siguiente User-Agent...")
+                continue
+
+            if response.status_code != 200:
+                print(f"Error HTTP {response.status_code}")
+                return None
+
             content_type = response.headers.get("Content-Type", "")
-            # Verificar que es realmente un PDF
+
             if "pdf" in content_type or response.content[:4] == b"%PDF":
                 print("PDF verificado correctamente")
                 return response.content
-            else:
-                print(f"El archivo descargado no es un PDF. Content-Type: {content_type}")
+
+            if "html" in content_type:
+                page_text = response.text.lower()
+                if any(signal in page_text for signal in PAYWALL_SIGNALS):
+                    print("Paywall detectado — no se puede descargar el PDF")
+                    return None
+                print("Respuesta HTML sin paywall — no es un PDF descargable directamente")
                 return None
-        else:
-            print(f"Error al descargar: Status {response.status_code}")
+
+            print(f"Formato no reconocido: {content_type}")
             return None
-    except Exception as e:
-        print(f"Excepción al descargar PDF: {e}")
-        return None
+
+        except Exception as e:
+            print(f"Excepción intento {attempt}: {e}")
+            if attempt == len(USER_AGENTS):
+                return None
+
+    return None
 
 
 def upload_to_drive(article):
@@ -87,9 +111,9 @@ def upload_to_drive(article):
 
         print(f"Procesando artículo: {title[:50]}")
         print(f"URL: {url}")
-        print(f"Tiene PDF según Unpaywall: {has_pdf}")
+        print(f"PDF en acceso abierto localizado: {has_pdf}")
 
-        # Intentar descargar el PDF si Unpaywall dijo que existe
+        # Intentar descargar el PDF si alguna fuente encontró una URL
         pdf_content = None
         if has_pdf and url:
             pdf_content = download_pdf(url)
@@ -103,7 +127,7 @@ def upload_to_drive(article):
         else:
             # Guardar info del artículo como texto
             if has_pdf and url:
-                print("Unpaywall encontró PDF pero no se pudo descargar. Guardando info con enlace.")
+                print("PDF localizado pero no descargable. Guardando info con enlace.")
             else:
                 print("No hay PDF disponible. Guardando info del artículo.")
 
